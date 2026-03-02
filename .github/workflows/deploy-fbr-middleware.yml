@@ -1,0 +1,49 @@
+name: Deploy FBR Middleware
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (for reference)
+        uses: actions/checkout@v4
+
+      - name: SSH into VPS and Update
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -e
+
+            if [ ! -d /opt/fbr-middleware ]; then
+              echo "Directory /opt/fbr-middleware not found, creating and cloning..."
+              mkdir -p /opt
+              cd /opt
+              git clone ${{ secrets.FBR_MW_REPO_URL }} fbr-middleware
+            fi
+
+            cd /opt/fbr-middleware
+
+            # Ensure we are on main and up to date
+            git fetch origin main
+            git checkout main
+            git reset --hard origin/main
+
+            # Install production deps
+            npm install --production
+
+            # Ensure pm2 exists
+            if ! command -v pm2 >/dev/null 2>&1; then
+              npm install -g pm2
+            fi
+
+            pm2 restart fbr-middleware || pm2 start server.js --name fbr-middleware
+            pm2 save
+
