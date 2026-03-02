@@ -22,6 +22,17 @@ jobs:
           script: |
             set -e
 
+            # Load Node/npm into PATH (non-interactive SSH doesn't load .bashrc)
+            if [ -s "$HOME/.nvm/nvm.sh" ]; then
+              . "$HOME/.nvm/nvm.sh"
+            elif [ -x "$HOME/.local/share/fnm/fnm" ]; then
+              eval "$("$HOME/.local/share/fnm/fnm" env)"
+            elif command -v fnm >/dev/null 2>&1; then
+              eval "$(fnm env)"
+            elif [ -s "$HOME/.profile" ]; then
+              . "$HOME/.profile"
+            fi
+
             if [ ! -d /opt/fbr-middleware ]; then
               echo "Directory /opt/fbr-middleware not found, creating and cloning..."
               mkdir -p /opt
