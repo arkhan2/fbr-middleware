@@ -4,10 +4,10 @@
  * Calls FBR validate then post; returns { ok, invoiceNumber, dated, validationResponse } or { ok: false, error, ... }.
  */
 
+require("dotenv").config();
+
 const express = require("express");
 
-const FBR_BASE_URL = process.env.FBR_BASE_URL || "https://gw.fbr.gov.pk";
-const FBR_BEARER_TOKEN = process.env.FBR_BEARER_TOKEN;
 const MIDDLEWARE_API_KEY = process.env.MIDDLEWARE_API_KEY;
 const PORT = process.env.PORT || 3001;
 
@@ -31,13 +31,13 @@ function auth(req, res, next) {
   next();
 }
 
-async function callFbr(path, payload) {
-  const base = FBR_BASE_URL.replace(/\/$/, "");
+async function callFbr(baseUrl, bearerToken, path, payload) {
+  const base = (baseUrl || "").replace(/\/$/, "");
   const res = await fetch(`${base}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${FBR_BEARER_TOKEN}`,
+      Authorization: `Bearer ${bearerToken}`,
     },
     body: JSON.stringify(payload),
   });
@@ -45,23 +45,25 @@ async function callFbr(path, payload) {
 }
 
 app.post("/api/submit", auth, async (req, res) => {
-  if (!FBR_BEARER_TOKEN || !FBR_BASE_URL) {
-    return res.status(503).json({
-      ok: false,
-      error: "Middleware not configured. Set FBR_BEARER_TOKEN and FBR_BASE_URL on the server.",
-    });
-  }
-
   const payload = req.body?.payload;
+  const fbrBearerToken = (req.body?.fbrBearerToken && String(req.body.fbrBearerToken).trim()) || null;
+  const fbrBaseUrl = (req.body?.fbrBaseUrl && String(req.body.fbrBaseUrl).trim()) || null;
+
   if (!payload || !payload.items || !Array.isArray(payload.items)) {
     return res.status(400).json({ ok: false, error: "Body must be { payload: <FBR DI request> }" });
+  }
+  if (!fbrBearerToken || !fbrBaseUrl) {
+    return res.status(400).json({
+      ok: false,
+      error: "Body must include fbrBearerToken and fbrBaseUrl (per-company credentials from invoicing app).",
+    });
   }
 
   const isSandbox = payload.scenarioId != null;
   const validatePath = isSandbox ? VALIDATE_SB : VALIDATE_PROD;
   const postPath = isSandbox ? POST_SB : POST_PROD;
 
-  const validateData = await callFbr(validatePath, payload);
+  const validateData = await callFbr(fbrBaseUrl, fbrBearerToken, validatePath, payload);
   const vr = validateData.validationResponse;
   if (vr && vr.statusCode !== "00") {
     return res.status(400).json({
@@ -72,7 +74,7 @@ app.post("/api/submit", auth, async (req, res) => {
     });
   }
 
-  const postData = await callFbr(postPath, payload);
+  const postData = await callFbr(fbrBaseUrl, fbrBearerToken, postPath, payload);
   const postVr = postData.validationResponse;
   if (postVr && postVr.statusCode !== "00") {
     return res.status(400).json({
@@ -94,16 +96,12 @@ app.post("/api/submit", auth, async (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    fbrConfigured: !!(FBR_BEARER_TOKEN && FBR_BASE_URL),
     middlewareKeySet: !!MIDDLEWARE_API_KEY,
   });
 });
 
 app.listen(PORT, () => {
   console.log(`FBR middleware listening on port ${PORT}`);
-  if (!FBR_BEARER_TOKEN || !FBR_BASE_URL) {
-    console.warn("WARN: FBR_BEARER_TOKEN or FBR_BASE_URL not set; /api/submit will return 503.");
-  }
   if (!MIDDLEWARE_API_KEY) {
     console.warn("WARN: MIDDLEWARE_API_KEY not set; all requests will be rejected.");
   }

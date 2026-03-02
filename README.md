@@ -40,4 +40,4 @@ In the main app set (server env only):
 - `FBR_MIDDLEWARE_URL=https://your-vps-domain-or-ip` (no trailing slash; app will call `/api/submit`)
 - `FBR_MIDDLEWARE_API_KEY=<same value as MIDDLEWARE_API_KEY on this server>`
 
-Do **not** set `FBR_BEARER_TOKEN` or `FBR_BASE_URL` in the app when using middleware.
+Each company sets its own FBR Base URL and FBR Bearer token in the Company profile. When the app calls the middleware, it sends that company's credentials in the request body.
