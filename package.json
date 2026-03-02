@@ -1,0 +1,15 @@
+{
+  "name": "fbr-middleware",
+  "version": "1.0.0",
+  "description": "FBR Digital Invoicing middleware – runs on VPS; app calls this instead of FBR directly.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

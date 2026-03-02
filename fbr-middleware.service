@@ -1,0 +1,16 @@
+[Unit]
+Description=FBR Digital Invoicing Middleware
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fbr-middleware
+EnvironmentFile=/opt/fbr-middleware/.env
+ExecStart=/usr/bin/node /opt/fbr-middleware/server.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

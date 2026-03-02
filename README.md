@@ -1,0 +1,43 @@
+# FBR Middleware
+
+Standalone service that receives invoice payloads from the invoicing app and submits them to FBR. Deploy on a VPS (e.g. Contabo) so the main app never holds FBR credentials.
+
+## Contract
+
+- **POST /api/submit**  
+  - Header: `Authorization: Bearer <MIDDLEWARE_API_KEY>`  
+  - Body: `{ "payload": <FBR DI request> }`  
+  - Success: `200` + `{ ok: true, invoiceNumber, dated, validationResponse }`  
+  - Error: `4xx/5xx` + `{ ok: false, error, statusCode?, validationResponse? }`
+
+- **GET /health** – returns `{ ok, fbrConfigured, middlewareKeySet }`.
+
+## Env (on this server)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `FBR_BASE_URL` | Yes | e.g. `https://gw.fbr.gov.pk` |
+| `FBR_BEARER_TOKEN` | Yes | PRAL-issued token |
+| `MIDDLEWARE_API_KEY` | Yes | Secret the **app** uses in `Authorization: Bearer <key>` |
+
+## Run locally
+
+```bash
+cp .env.example .env
+# Edit .env with real values
+npm install
+npm start
+```
+
+## Deploy on VPS (e.g. Contabo)
+
+See [../docs/FBR_INTEGRATION.md#deploying-on-a-vps-eg-contabo](../docs/FBR_INTEGRATION.md#deploying-on-a-vps-eg-contabo).
+
+## App configuration
+
+In the main app set (server env only):
+
+- `FBR_MIDDLEWARE_URL=https://your-vps-domain-or-ip` (no trailing slash; app will call `/api/submit`)
+- `FBR_MIDDLEWARE_API_KEY=<same value as MIDDLEWARE_API_KEY on this server>`
+
+Do **not** set `FBR_BEARER_TOKEN` or `FBR_BASE_URL` in the app when using middleware.
