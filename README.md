@@ -6,19 +6,20 @@ Standalone service that receives invoice payloads from the invoicing app and sub
 
 - **POST /api/submit**  
   - Header: `Authorization: Bearer <MIDDLEWARE_API_KEY>`  
-  - Body: `{ "payload": <FBR DI request> }`  
+  - Body: `{ "payload": <FBR DI request>, "fbrBaseUrl": "...", "fbrBearerToken": "..." }` (token/URL from company profile, sent by app)  
   - Success: `200` + `{ ok: true, invoiceNumber, dated, validationResponse }`  
   - Error: `4xx/5xx` + `{ ok: false, error, statusCode?, validationResponse? }`
 
-- **GET /health** – returns `{ ok, fbrConfigured, middlewareKeySet }`.
+- **GET /health** – returns `{ ok, middlewareKeySet }`.
 
 ## Env (on this server)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `FBR_BASE_URL` | Yes | e.g. `https://gw.fbr.gov.pk` |
-| `FBR_BEARER_TOKEN` | Yes | PRAL-issued token |
 | `MIDDLEWARE_API_KEY` | Yes | Secret the **app** uses in `Authorization: Bearer <key>` |
+| `PORT` | No | Default `3001` |
+
+FBR base URL and bearer token are **not** stored on the middleware; the app sends `fbrBaseUrl` and `fbrBearerToken` in each request body (per company).
 
 ## Run locally
 
