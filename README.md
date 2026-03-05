@@ -1,44 +1,47 @@
-# FBR Middleware
+# FBR Digital Invoicing Middleware
 
-Standalone service that receives invoice payloads from the invoicing app and submits them to FBR. Deploy on a VPS (e.g. Contabo) so the main app never holds FBR credentials.
+Node.js middleware that receives invoice payloads from the invoicing app and forwards them to the FBR/PRAL Digital Invoicing API.
 
-## Contract
+## How to view middleware logs
 
-- **POST /api/submit**  
-  - Header: `Authorization: Bearer <MIDDLEWARE_API_KEY>`  
-  - Body: `{ "payload": <FBR DI request>, "fbrBaseUrl": "...", "fbrBearerToken": "..." }` (token/URL from company profile, sent by app)  
-  - Success: `200` + `{ ok: true, invoiceNumber, dated, validationResponse }`  
-  - Error: `4xx/5xx` + `{ ok: false, error, statusCode?, validationResponse? }`
+Logs are printed to **stdout** and **stderr** of the process that runs the middleware.
 
-- **GET /health** – returns `{ ok, middlewareKeySet }`.
+### Running in a terminal (easiest for debugging)
 
-## Env (on this server)
+1. Open a terminal.
+2. Go to the middleware folder:
+   ```bash
+   cd fbr-middleware
+   ```
+3. Create a `.env` file with `MIDDLEWARE_API_KEY` and optionally `PORT` (default 3001).
+4. Start the server:
+   ```bash
+   npm start
+   ```
+   Or: `node server.js`
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `MIDDLEWARE_API_KEY` | Yes | Secret the **app** uses in `Authorization: Bearer <key>` |
-| `PORT` | No | Default `3001` |
+All logs appear **in that terminal**. You’ll see:
 
-FBR base URL and bearer token are **not** stored on the middleware; the app sends `fbrBaseUrl` and `fbrBearerToken` in each request body (per company).
+- `FBR middleware listening on port 3001` when the server starts
+- `[FBR middleware] POST /api/submit received` when a post is attempted
+- `[FBR middleware] Post response keys: [...]` — the top-level keys from the FBR post API response (useful when the invoice number is missing)
+- `[FBR middleware] Success, invoiceNumber: <value>` on success
+- `FBR post succeeded but no invoice number found. Response top-level keys: [...]` if the post succeeded but no known invoice-number field was found
 
-## Run locally
+Keep this terminal open while testing; logs stream in real time.
 
-```bash
-cp .env.example .env
-# Edit .env with real values
-npm install
-npm start
-```
+### Running in the background (e.g. PM2 or systemd)
 
-## Deploy on VPS (e.g. Contabo)
+- **PM2:** `pm2 start server.js --name fbr-middleware`  
+  View logs: `pm2 logs fbr-middleware` or `pm2 logs fbr-middleware --lines 100`
+- **systemd:** Logs go to journald. View with: `journalctl -u your-service-name -f`
+- **Docker:** Use `docker logs -f <container>` to follow the container’s stdout
 
-See [../docs/FBR_INTEGRATION.md#deploying-on-a-vps-eg-contabo](../docs/FBR_INTEGRATION.md#deploying-on-a-vps-eg-contabo).
+### Summary
 
-## App configuration
-
-In the main app set (server env only):
-
-- `FBR_MIDDLEWARE_URL=https://your-vps-domain-or-ip` (no trailing slash; app will call `/api/submit`)
-- `FBR_MIDDLEWARE_API_KEY=<same value as MIDDLEWARE_API_KEY on this server>`
-
-Each company sets its own FBR Base URL and FBR Bearer token in the Company profile. When the app calls the middleware, it sends that company's credentials in the request body.
+| How you run it        | Where to see logs                          |
+|-----------------------|--------------------------------------------|
+| Terminal (`npm start`) | Same terminal window                       |
+| PM2                   | `pm2 logs fbr-middleware`                  |
+| systemd               | `journalctl -u <service> -f`               |
+| Docker                | `docker logs -f <container>`               |

@@ -1,7 +1,12 @@
 /**
  * FBR Digital Invoicing middleware.
- * Contract: POST /api/submit with Authorization: Bearer <MIDDLEWARE_API_KEY>, body: { payload }.
- * Calls FBR validate then post; returns { ok, invoiceNumber, dated, validationResponse } or { ok: false, error, ... }.
+ * Contract: POST /api/submit with Authorization: Bearer <MIDDLEWARE_API_KEY>,
+ * body: { payload, fbrBearerToken, fbrBaseUrl [, fbrValidateBaseUrl, fbrValidateToken ] }.
+ * - fbrValidateBaseUrl + fbrValidateToken: optional; when provided in sandbox (payload.scenarioId set),
+ *   validate call uses this URL/token (e.g. validateinvoicedata sandbox URL). Post always uses fbrBaseUrl/fbrBearerToken.
+ * Calls FBR validate then post; returns normalized fields plus full FBR responses:
+ * - Success: { ok: true, invoiceNumber, dated, validationResponse, fbrValidateResponse, fbrPostResponse }
+ * - Error: { ok: false, error, statusCode?, validationResponse?, fbrValidateResponse?, fbrPostResponse? }
  */
 
 require("dotenv").config();
@@ -31,9 +36,14 @@ function auth(req, res, next) {
   next();
 }
 
-async function callFbr(baseUrl, bearerToken, path, payload) {
+async function callFbr(baseUrl, bearerToken, path, payload, logLabel = "FBR") {
   const base = (baseUrl || "").replace(/\/$/, "");
-  const res = await fetch(`${base}${path}`, {
+  // If base URL is already a full endpoint (ends with this path), use as-is to avoid duplicating path
+  const pathNoLeading = path.replace(/^\//, "");
+  const isFullUrl = pathNoLeading && (base.endsWith(pathNoLeading) || base === pathNoLeading);
+  const url = isFullUrl ? base : `${base}${path}`;
+  console.log(`[FBR middleware] ${logLabel} request URL: ${url}`);
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -41,18 +51,26 @@ async function callFbr(baseUrl, bearerToken, path, payload) {
     },
     body: JSON.stringify(payload),
   });
-  return res.json().catch(() => ({}));
+  const status = res.status;
+  const body = await res.json().catch(() => ({}));
+  console.log(`[FBR middleware] ${logLabel} response status: ${status}, body keys: ${Object.keys(body || {}).join(", ") || "(empty)"}`);
+  return { status, body };
 }
 
 app.post("/api/submit", auth, async (req, res) => {
+  console.log("[FBR middleware] ----- POST /api/submit received -----");
   const payload = req.body?.payload;
   const fbrBearerToken = (req.body?.fbrBearerToken && String(req.body.fbrBearerToken).trim()) || null;
   const fbrBaseUrl = (req.body?.fbrBaseUrl && String(req.body.fbrBaseUrl).trim()) || null;
+  const fbrValidateBaseUrl = (req.body?.fbrValidateBaseUrl && String(req.body.fbrValidateBaseUrl).trim()) || null;
+  const fbrValidateToken = (req.body?.fbrValidateToken && String(req.body.fbrValidateToken).trim()) || null;
 
   if (!payload || !payload.items || !Array.isArray(payload.items)) {
-    return res.status(400).json({ ok: false, error: "Body must be { payload: <FBR DI request> }" });
+    console.warn("[FBR middleware] Rejected: missing payload or payload.items");
+    return res.status(400).json({ ok: false, error: "Body must be { payload, fbrBearerToken, fbrBaseUrl } with payload.items array" });
   }
   if (!fbrBearerToken || !fbrBaseUrl) {
+    console.warn("[FBR middleware] Rejected: missing fbrBearerToken or fbrBaseUrl");
     return res.status(400).json({
       ok: false,
       error: "Body must include fbrBearerToken and fbrBaseUrl (per-company credentials from invoicing app).",
@@ -62,34 +80,93 @@ app.post("/api/submit", auth, async (req, res) => {
   const isSandbox = payload.scenarioId != null;
   const validatePath = isSandbox ? VALIDATE_SB : VALIDATE_PROD;
   const postPath = isSandbox ? POST_SB : POST_PROD;
+  const base = (fbrBaseUrl || "").replace(/\/$/, "");
+  // In sandbox, use separate validate URL/token when provided (validateinvoicedata sandbox URL)
+  const validateBaseUrl = isSandbox && fbrValidateBaseUrl && fbrValidateToken
+    ? fbrValidateBaseUrl.replace(/\/$/, "")
+    : base;
+  const validateToken = isSandbox && fbrValidateBaseUrl && fbrValidateToken ? fbrValidateToken : fbrBearerToken;
+  console.log("[FBR middleware] FBR base URL (post):", base, "| sandbox:", isSandbox, "| validate path:", validatePath, "| post path:", postPath);
+  if (isSandbox && fbrValidateBaseUrl && fbrValidateToken) {
+    console.log("[FBR middleware] Validate URL (sandbox):", validateBaseUrl);
+  }
+  console.log("[FBR middleware] Payload: invoiceDate:", payload.invoiceDate, "| items:", (payload.items || []).length, "| scenarioId:", payload.scenarioId ?? "(prod)");
 
-  const validateData = await callFbr(fbrBaseUrl, fbrBearerToken, validatePath, payload);
+  const validateResult = await callFbr(validateBaseUrl, validateToken, validatePath, payload, "Validate");
+  const validateData = validateResult.body || {};
   const vr = validateData.validationResponse;
-  if (vr && vr.statusCode !== "00") {
+  // Do not post unless validation clearly succeeded: HTTP 200 and validationResponse.statusCode "00"
+  const validateOk = validateResult.status === 200 && vr && vr.statusCode === "00";
+  if (!validateOk) {
+    const statusCode = vr?.statusCode ?? (validateResult.status !== 200 ? String(validateResult.status) : "(no response)");
+    const errMsg = vr?.error || vr?.status ||
+      (validateResult.status !== 200 ? `Validate request failed (HTTP ${validateResult.status}). Check validate URL.` : "Validation failed");
+    console.warn("[FBR middleware] Validate failed – not proceeding to post. HTTP:", validateResult.status, "statusCode:", statusCode, "error:", errMsg);
+    console.warn("[FBR middleware] Full FBR validate response:", JSON.stringify(validateData, null, 2));
+    console.warn("[FBR middleware] ----- POST /api/submit complete (400 validate) -----");
     return res.status(400).json({
       ok: false,
-      error: vr.error || "Validation failed",
-      statusCode: vr.statusCode,
-      validationResponse: vr,
+      error: errMsg,
+      statusCode: statusCode,
+      validationResponse: vr || { statusCode: "", status: "Error", error: errMsg },
+      fbrValidateResponse: validateData,
+      fbrPostResponse: null,
     });
   }
 
-  const postData = await callFbr(fbrBaseUrl, fbrBearerToken, postPath, payload);
+  const postResult = await callFbr(fbrBaseUrl, fbrBearerToken, postPath, payload, "Post");
+  const postData = postResult.body || {};
   const postVr = postData.validationResponse;
-  if (postVr && postVr.statusCode !== "00") {
+  if (postResult.status !== 200 || (postVr && postVr.statusCode !== "00")) {
+    const postErr = postVr?.error || postData?.error || (postResult.status !== 200 ? `Post request failed (HTTP ${postResult.status}).` : "Post failed");
+    console.warn("[FBR middleware] Post failed. HTTP:", postResult.status, "statusCode:", postVr?.statusCode, "error:", postErr);
+    console.warn("[FBR middleware] Full FBR post response:", JSON.stringify(postData, null, 2));
+    console.warn("[FBR middleware] ----- POST /api/submit complete (400 post) -----");
     return res.status(400).json({
       ok: false,
-      error: postVr.error || postData.error || "Post failed",
-      statusCode: postVr.statusCode,
+      error: postErr,
+      statusCode: postVr?.statusCode ?? (postResult.status !== 200 ? String(postResult.status) : undefined),
       validationResponse: postVr,
+      fbrValidateResponse: validateData,
+      fbrPostResponse: postData,
     });
   }
 
+  // FBR/PRAL may return invoice number under various keys (camelCase, snake_case, IRN, invoiceNo, or in item statuses)
+  const trim = (v) => (v != null && String(v).trim() ? String(v).trim() : "");
+  const from = (obj) =>
+    obj && typeof obj === "object" && !Array.isArray(obj)
+      ? trim(obj.invoiceNumber) || trim(obj.InvoiceNumber) || trim(obj.invoice_number) || trim(obj.IRN) || trim(obj.Irn) || trim(obj.invoiceNo) || trim(obj.invoice_id)
+      : "";
+  const invoiceNumber =
+    from(postData) ||
+    from(postData?.data) ||
+    (postVr?.invoiceStatuses?.[0]?.invoiceNo && trim(postVr.invoiceStatuses[0].invoiceNo)) ||
+    (postData?.validationResponse?.invoiceStatuses?.[0]?.invoiceNo && trim(postData.validationResponse.invoiceStatuses[0].invoiceNo)) ||
+    "";
+
+  if (!invoiceNumber) {
+    console.warn("[FBR middleware] FBR post succeeded but no invoice number found. Top-level keys:", Object.keys(postData || {}));
+    console.warn("[FBR middleware] Full FBR post response (for debugging):", JSON.stringify(postData, null, 2));
+    console.warn("[FBR middleware] ----- POST /api/submit complete (502) -----");
+    return res.status(502).json({
+      ok: false,
+      error: "FBR post succeeded but no invoice number in response. Check FBR response shape (invoiceNumber/invoice_number/invoiceStatuses[].invoiceNo).",
+      validationResponse: postVr || { statusCode: "00", status: "Valid", error: "" },
+      fbrValidateResponse: validateData,
+      fbrPostResponse: postData,
+    });
+  }
+
+  console.log("[FBR middleware] Success, invoiceNumber:", invoiceNumber, "| dated:", postData.dated);
+  console.log("[FBR middleware] ----- POST /api/submit complete -----");
   res.status(200).json({
     ok: true,
-    invoiceNumber: postData.invoiceNumber || "",
+    invoiceNumber,
     dated: postData.dated,
     validationResponse: postVr || { statusCode: "00", status: "Valid", error: "" },
+    fbrValidateResponse: validateData,
+    fbrPostResponse: postData,
   });
 });
 
