@@ -101,18 +101,28 @@ app.post("/api/submit", auth, async (req, res) => {
     const statusCode = vr?.statusCode ?? (validateResult.status !== 200 ? String(validateResult.status) : "(no response)");
     let errMsg = vr?.error || vr?.status ||
       (validateResult.status !== 200 ? `Validate request failed (HTTP ${validateResult.status}). Check validate URL.` : "Validation failed");
-    if (errMsg === "Invalid" || (typeof errMsg === "string" && errMsg.trim() === "Invalid")) {
+    // Build detailed message from per-item errors (invoiceStatuses) when present
+    const itemErrors = Array.isArray(vr?.invoiceStatuses)
+      ? vr.invoiceStatuses
+          .filter((s) => s?.error && String(s.error).trim())
+          .map((s) => `Item ${s.itemSNo || "?"}: ${String(s.error).trim()}`)
+      : [];
+    if (itemErrors.length > 0) {
+      errMsg = itemErrors.join(" | ");
+    } else if (errMsg === "Invalid" || (typeof errMsg === "string" && errMsg.trim() === "Invalid")) {
       errMsg = "FBR validation failed: Invalid. Check invoice data (NTN, amounts, line items, scenario) and try again.";
     }
+    // Log and return the complete FBR validate response (full raw body we received)
+    const fullValidateResponse = validateResult.body ?? validateData;
     console.warn("[FBR middleware] Validate failed – not proceeding to post. HTTP:", validateResult.status, "statusCode:", statusCode, "error:", errMsg);
-    console.warn("[FBR middleware] Full FBR validate response:", JSON.stringify(validateData, null, 2));
+    console.warn("[FBR middleware] Full FBR validate response (complete):", JSON.stringify(fullValidateResponse, null, 2));
     console.warn("[FBR middleware] ----- POST /api/submit complete (400 validate) -----");
     return res.status(400).json({
       ok: false,
       error: errMsg,
       statusCode: statusCode,
       validationResponse: vr || { statusCode: "", status: "Error", error: errMsg },
-      fbrValidateResponse: validateData,
+      fbrValidateResponse: fullValidateResponse,
       fbrPostResponse: null,
     });
   }

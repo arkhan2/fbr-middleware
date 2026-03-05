@@ -37,6 +37,49 @@ Keep this terminal open while testing; logs stream in real time.
 - **systemd:** Logs go to journald. View with: `journalctl -u your-service-name -f`
 - **Docker:** Use `docker logs -f <container>` to follow the container’s stdout
 
+### Viewing logs on Contabo (or any VPS)
+
+Your middleware runs on a remote server (e.g. Contabo VPS at `155.133.27.123`). To see its logs:
+
+1. **SSH into the server**
+   ```bash
+   ssh your-user@155.133.27.123
+   ```
+   (Use your Contabo SSH user and key/password.)
+
+2. **Find how the middleware is running**, then view logs:
+
+   - **PM2 (recommended on VPS)**
+     ```bash
+     pm2 logs fbr-middleware
+     ```
+     Follow live: `pm2 logs fbr-middleware -f`  
+     Last 200 lines: `pm2 logs fbr-middleware --lines 200`
+
+   - **systemd service**
+     ```bash
+     journalctl -u fbr-middleware -f
+     ```
+     (Use your actual service name if different, e.g. `journalctl -u fbr-middleware.service -f`.)
+
+   - **Running in a terminal (e.g. inside `screen` or `tmux`)**
+     Reattach to that session to see the same terminal:
+     - screen: `screen -r`
+     - tmux: `tmux attach`
+
+   - **Bare `node server.js` in background**
+     Logs may be in nohup: `tail -f nohup.out` (if you started with `nohup node server.js &`).
+
+3. **If you’re not sure how it’s running**
+   ```bash
+   ps aux | grep node
+   ```
+   or
+   ```bash
+   pm2 list
+   ```
+   If you see it under PM2, use `pm2 logs fbr-middleware`.
+
 ### Summary
 
 | How you run it        | Where to see logs                          |
@@ -45,3 +88,4 @@ Keep this terminal open while testing; logs stream in real time.
 | PM2                   | `pm2 logs fbr-middleware`                  |
 | systemd               | `journalctl -u <service> -f`               |
 | Docker                | `docker logs -f <container>`               |
+| Contabo / VPS         | SSH in, then use the command above that matches how you run it |
