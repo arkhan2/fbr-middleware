@@ -99,8 +99,11 @@ app.post("/api/submit", auth, async (req, res) => {
   const validateOk = validateResult.status === 200 && vr && vr.statusCode === "00";
   if (!validateOk) {
     const statusCode = vr?.statusCode ?? (validateResult.status !== 200 ? String(validateResult.status) : "(no response)");
-    const errMsg = vr?.error || vr?.status ||
+    let errMsg = vr?.error || vr?.status ||
       (validateResult.status !== 200 ? `Validate request failed (HTTP ${validateResult.status}). Check validate URL.` : "Validation failed");
+    if (errMsg === "Invalid" || (typeof errMsg === "string" && errMsg.trim() === "Invalid")) {
+      errMsg = "FBR validation failed: Invalid. Check invoice data (NTN, amounts, line items, scenario) and try again.";
+    }
     console.warn("[FBR middleware] Validate failed – not proceeding to post. HTTP:", validateResult.status, "statusCode:", statusCode, "error:", errMsg);
     console.warn("[FBR middleware] Full FBR validate response:", JSON.stringify(validateData, null, 2));
     console.warn("[FBR middleware] ----- POST /api/submit complete (400 validate) -----");
@@ -118,7 +121,10 @@ app.post("/api/submit", auth, async (req, res) => {
   const postData = postResult.body || {};
   const postVr = postData.validationResponse;
   if (postResult.status !== 200 || (postVr && postVr.statusCode !== "00")) {
-    const postErr = postVr?.error || postData?.error || (postResult.status !== 200 ? `Post request failed (HTTP ${postResult.status}).` : "Post failed");
+    let postErr = postVr?.error || postData?.error || (postResult.status !== 200 ? `Post request failed (HTTP ${postResult.status}).` : "Post failed");
+    if (postErr === "Invalid" || (typeof postErr === "string" && postErr.trim() === "Invalid")) {
+      postErr = "FBR post failed: Invalid. Check invoice data and FBR response in middleware logs.";
+    }
     console.warn("[FBR middleware] Post failed. HTTP:", postResult.status, "statusCode:", postVr?.statusCode, "error:", postErr);
     console.warn("[FBR middleware] Full FBR post response:", JSON.stringify(postData, null, 2));
     console.warn("[FBR middleware] ----- POST /api/submit complete (400 post) -----");
@@ -132,26 +138,38 @@ app.post("/api/submit", auth, async (req, res) => {
     });
   }
 
-  // FBR/PRAL may return invoice number under various keys (camelCase, snake_case, IRN, invoiceNo, or in item statuses)
+  // FBR/PRAL may return invoice number under various keys; check top-level, nested (data/result/response), and item statuses
   const trim = (v) => (v != null && String(v).trim() ? String(v).trim() : "");
-  const from = (obj) =>
-    obj && typeof obj === "object" && !Array.isArray(obj)
-      ? trim(obj.invoiceNumber) || trim(obj.InvoiceNumber) || trim(obj.invoice_number) || trim(obj.IRN) || trim(obj.Irn) || trim(obj.invoiceNo) || trim(obj.invoice_id)
-      : "";
+  const knownKeys = [
+    "invoiceNumber", "InvoiceNumber", "invoice_number", "invoiceNo", "InvoiceNo",
+    "IRN", "Irn", "irn", "invoiceId", "invoice_id", "refNo", "referenceNo", "invoiceRefNo"
+  ];
+  const from = (obj) => {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return "";
+    for (const k of knownKeys) {
+      const v = trim(obj[k]);
+      if (v) return v;
+    }
+    return "";
+  };
   const invoiceNumber =
     from(postData) ||
     from(postData?.data) ||
+    from(postData?.result) ||
+    from(postData?.response) ||
     (postVr?.invoiceStatuses?.[0]?.invoiceNo && trim(postVr.invoiceStatuses[0].invoiceNo)) ||
     (postData?.validationResponse?.invoiceStatuses?.[0]?.invoiceNo && trim(postData.validationResponse.invoiceStatuses[0].invoiceNo)) ||
+    (postVr?.invoiceNo && trim(postVr.invoiceNo)) ||
     "";
 
   if (!invoiceNumber) {
-    console.warn("[FBR middleware] FBR post succeeded but no invoice number found. Top-level keys:", Object.keys(postData || {}));
-    console.warn("[FBR middleware] Full FBR post response (for debugging):", JSON.stringify(postData, null, 2));
+    const topKeys = Object.keys(postData || {});
+    console.warn("[FBR middleware] FBR post succeeded but no invoice number found. Top-level keys:", topKeys.join(", ") || "(none)");
+    console.warn("[FBR middleware] Full FBR post response (check this to see the exact field name FBR uses):", JSON.stringify(postData, null, 2));
     console.warn("[FBR middleware] ----- POST /api/submit complete (502) -----");
     return res.status(502).json({
       ok: false,
-      error: "FBR post succeeded but no invoice number in response. Check FBR response shape (invoiceNumber/invoice_number/invoiceStatuses[].invoiceNo).",
+      error: `FBR post succeeded but no invoice number in response. Response keys: ${topKeys.length ? topKeys.join(", ") : "empty"}. Check middleware logs for full response and FBR docs for the correct field name.`,
       validationResponse: postVr || { statusCode: "00", status: "Valid", error: "" },
       fbrValidateResponse: validateData,
       fbrPostResponse: postData,
