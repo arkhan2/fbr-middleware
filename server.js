@@ -7,6 +7,10 @@
  * Calls FBR validate then post; returns normalized fields plus full FBR responses:
  * - Success: { ok: true, invoiceNumber, dated, validationResponse, fbrValidateResponse, fbrPostResponse }
  * - Error: { ok: false, error, statusCode?, validationResponse?, fbrValidateResponse?, fbrPostResponse? }
+ *
+ * Contract: POST /api/reference with Authorization: Bearer <MIDDLEWARE_API_KEY>,
+ * body: { path, params?, fbrBaseUrl, fbrBearerToken }.
+ * Forwards GET (fbrBaseUrl + path)?(params) with Bearer token; returns FBR response as JSON.
  */
 
 require("dotenv").config();
@@ -196,6 +200,63 @@ app.post("/api/submit", auth, async (req, res) => {
     fbrValidateResponse: validateData,
     fbrPostResponse: postData,
   });
+});
+
+/** POST /api/reference – forward FBR reference API GET (provinces, HS_UOM, itemdesccode, uom, etc.) */
+app.post("/api/reference", auth, async (req, res) => {
+  const path = req.body?.path != null ? String(req.body.path).trim() : "";
+  const params = req.body?.params && typeof req.body.params === "object" ? req.body.params : null;
+  const fbrBaseUrl = req.body?.fbrBaseUrl != null ? String(req.body.fbrBaseUrl).trim() : "";
+  const fbrBearerToken = req.body?.fbrBearerToken != null ? String(req.body.fbrBearerToken).trim() : "";
+
+  if (!path || !fbrBaseUrl || !fbrBearerToken) {
+    console.warn("[FBR middleware] /api/reference rejected: missing path, fbrBaseUrl, or fbrBearerToken");
+    return res.status(400).json({
+      error: "Body must be { path, params?, fbrBaseUrl, fbrBearerToken }",
+    });
+  }
+
+  const base = fbrBaseUrl.replace(/\/$/, "");
+  const pathNorm = path.startsWith("/") ? path : `/${path}`;
+  const url = new URL(pathNorm, base);
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
+  }
+  const fullUrl = url.toString();
+  console.log("[FBR middleware] /api/reference GET:", fullUrl);
+
+  try {
+    const fbrRes = await fetch(fullUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${fbrBearerToken}`,
+      },
+    });
+    const text = await fbrRes.text();
+    if (!fbrRes.ok) {
+      console.warn("[FBR middleware] /api/reference FBR non-OK:", fbrRes.status, text.slice(0, 200));
+      res.status(fbrRes.status);
+      try {
+        res.json(text ? JSON.parse(text) : { error: text || `FBR returned ${fbrRes.status}` });
+      } catch {
+        res.send(text);
+      }
+      return;
+    }
+    res.status(fbrRes.status).set("Content-Type", fbrRes.headers.get("content-type") || "application/json");
+    try {
+      res.send(text ? JSON.parse(text) : {});
+    } catch {
+      res.send(text);
+    }
+  } catch (err) {
+    console.error("[FBR middleware] /api/reference fetch failed:", err);
+    res.status(502).json({
+      error: "FBR request failed",
+      message: err?.message || String(err),
+    });
+  }
 });
 
 app.get("/health", (req, res) => {
