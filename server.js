@@ -46,6 +46,7 @@ async function callFbr(baseUrl, bearerToken, path, payload, logLabel = "FBR") {
   const pathNoLeading = path.replace(/^\//, "");
   const isFullUrl = pathNoLeading && (base.endsWith(pathNoLeading) || base === pathNoLeading);
   const url = isFullUrl ? base : `${base}${path}`;
+  const startMs = Date.now();
   console.log(`[FBR middleware] ${logLabel} request URL: ${url}`);
   const res = await fetch(url, {
     method: "POST",
@@ -55,13 +56,15 @@ async function callFbr(baseUrl, bearerToken, path, payload, logLabel = "FBR") {
     },
     body: JSON.stringify(payload),
   });
+  const elapsedMs = Date.now() - startMs;
   const status = res.status;
   const body = await res.json().catch(() => ({}));
-  console.log(`[FBR middleware] ${logLabel} response status: ${status}, body keys: ${Object.keys(body || {}).join(", ") || "(empty)"}`);
+  console.log(`[FBR middleware] ${logLabel} response status: ${status}, body keys: ${Object.keys(body || {}).join(", ") || "(empty)"}, FBR took: ${elapsedMs} ms`);
   return { status, body };
 }
 
 app.post("/api/submit", auth, async (req, res) => {
+  const submitStartMs = Date.now();
   console.log("[FBR middleware] ----- POST /api/submit received -----");
   const payload = req.body?.payload;
   const fbrBearerToken = (req.body?.fbrBearerToken && String(req.body.fbrBearerToken).trim()) || null;
@@ -120,7 +123,7 @@ app.post("/api/submit", auth, async (req, res) => {
     const fullValidateResponse = validateResult.body ?? validateData;
     console.warn("[FBR middleware] Validate failed – not proceeding to post. HTTP:", validateResult.status, "statusCode:", statusCode, "error:", errMsg);
     console.warn("[FBR middleware] Full FBR validate response (complete):", JSON.stringify(fullValidateResponse, null, 2));
-    console.warn("[FBR middleware] ----- POST /api/submit complete (400 validate) -----");
+    console.warn("[FBR middleware] ----- POST /api/submit complete (400 validate), total:", Date.now() - submitStartMs, "ms -----");
     return res.status(400).json({
       ok: false,
       error: errMsg,
@@ -141,7 +144,7 @@ app.post("/api/submit", auth, async (req, res) => {
     }
     console.warn("[FBR middleware] Post failed. HTTP:", postResult.status, "statusCode:", postVr?.statusCode, "error:", postErr);
     console.warn("[FBR middleware] Full FBR post response:", JSON.stringify(postData, null, 2));
-    console.warn("[FBR middleware] ----- POST /api/submit complete (400 post) -----");
+    console.warn("[FBR middleware] ----- POST /api/submit complete (400 post), total:", Date.now() - submitStartMs, "ms -----");
     return res.status(400).json({
       ok: false,
       error: postErr,
@@ -180,7 +183,7 @@ app.post("/api/submit", auth, async (req, res) => {
     const topKeys = Object.keys(postData || {});
     console.warn("[FBR middleware] FBR post succeeded but no invoice number found. Top-level keys:", topKeys.join(", ") || "(none)");
     console.warn("[FBR middleware] Full FBR post response (check this to see the exact field name FBR uses):", JSON.stringify(postData, null, 2));
-    console.warn("[FBR middleware] ----- POST /api/submit complete (502) -----");
+    console.warn("[FBR middleware] ----- POST /api/submit complete (502), total:", Date.now() - submitStartMs, "ms -----");
     return res.status(502).json({
       ok: false,
       error: `FBR post succeeded but no invoice number in response. Response keys: ${topKeys.length ? topKeys.join(", ") : "empty"}. Check middleware logs for full response and FBR docs for the correct field name.`,
@@ -191,7 +194,7 @@ app.post("/api/submit", auth, async (req, res) => {
   }
 
   console.log("[FBR middleware] Success, invoiceNumber:", invoiceNumber, "| dated:", postData.dated);
-  console.log("[FBR middleware] ----- POST /api/submit complete -----");
+  console.log("[FBR middleware] ----- POST /api/submit complete, total:", Date.now() - submitStartMs, "ms -----");
   res.status(200).json({
     ok: true,
     invoiceNumber,
@@ -223,6 +226,7 @@ app.post("/api/reference", auth, async (req, res) => {
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
   }
   const fullUrl = url.toString();
+  const refStartMs = Date.now();
   console.log("[FBR middleware] /api/reference GET:", fullUrl);
 
   try {
@@ -234,6 +238,8 @@ app.post("/api/reference", auth, async (req, res) => {
       },
     });
     const text = await fbrRes.text();
+    const refElapsedMs = Date.now() - refStartMs;
+    console.log("[FBR middleware] /api/reference FBR took:", refElapsedMs, "ms, status:", fbrRes.status);
     if (!fbrRes.ok) {
       console.warn("[FBR middleware] /api/reference FBR non-OK:", fbrRes.status, text.slice(0, 200));
       res.status(fbrRes.status);
