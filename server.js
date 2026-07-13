@@ -1,7 +1,8 @@
 /**
  * FBR Digital Invoicing middleware.
  * Contract: POST /api/submit with Authorization: Bearer <MIDDLEWARE_API_KEY>,
- * body: { payload, fbrBearerToken, fbrBaseUrl [, fbrValidateBaseUrl, fbrValidateToken ] }.
+ * body: { payload, fbrBearerToken, fbrBaseUrl [, isSandbox, fbrValidateBaseUrl, fbrValidateToken ] }.
+ * - isSandbox: optional; when provided by invoicing app, preferred over payload.scenarioId for path selection.
  * - fbrValidateBaseUrl + fbrValidateToken: optional; when provided in sandbox (payload.scenarioId set),
  *   validate call uses this URL/token (e.g. validateinvoicedata sandbox URL). Post always uses fbrBaseUrl/fbrBearerToken.
  * Calls FBR validate then post; returns normalized fields plus full FBR responses:
@@ -25,6 +26,151 @@ const VALIDATE_PROD = "/di_data/v1/di/validateinvoicedata";
 const POST_SB = "/di_data/v1/di/postinvoicedata_sb";
 const POST_PROD = "/di_data/v1/di/postinvoicedata";
 
+const FBR_PRODUCTION_HEADER_KEYS = [
+  "invoiceType",
+  "invoiceDate",
+  "sellerNTNCNIC",
+  "sellerBusinessName",
+  "sellerProvince",
+  "sellerAddress",
+  "buyerNTNCNIC",
+  "buyerBusinessName",
+  "buyerProvince",
+  "buyerAddress",
+  "buyerRegistrationType",
+  "invoiceRefNo",
+];
+
+const FBR_ITEM_KEYS = [
+  "hsCode",
+  "productDescription",
+  "rate",
+  "uoM",
+  "quantity",
+  "totalValues",
+  "valueSalesExcludingST",
+  "fixedNotifiedValueOrRetailPrice",
+  "salesTaxApplicable",
+  "salesTaxWithheldAtSource",
+  "extraTax",
+  "furtherTax",
+  "sroScheduleNo",
+  "fedPayable",
+  "discount",
+  "saleType",
+  "sroItemSerialNo",
+];
+
+/** Gateway origin only — paths are appended by this service. */
+function normalizeFbrGatewayBaseUrl(baseUrl) {
+  const s = (baseUrl || "").trim();
+  if (!s) return "";
+  try {
+    const u = new URL(s.startsWith("http") ? s : `https://${s}`);
+    return u.origin;
+  } catch {
+    return s
+      .replace(/\/+$/, "")
+      .replace(/\/di_data\/v1\/di\/(post|validate)invoicedata(_sb)?$/i, "")
+      .split("/")
+      .slice(0, 3)
+      .join("/");
+  }
+}
+
+function stripSandboxFields(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const { scenarioId, ...rest } = payload;
+  const next = { ...rest };
+  if (next.invoiceType !== "Debit Note") next.invoiceRefNo = "";
+  return next;
+}
+
+/** PRAL expects numeric decimals; empty extraTax as "" triggers gateway Code 03. */
+function normalizeOutboundPayload(payload, isSandbox) {
+  if (!payload || typeof payload !== "object") return payload;
+  const roundMoney = (n) => {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return 0;
+    return Math.round(x * 100) / 100;
+  };
+  const roundQty = (n) => {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return 0;
+    return Math.round(x * 10000) / 10000;
+  };
+  const items = (payload.items || []).map((item) => {
+    const extra = item.extraTax;
+    const extraTax = extra != null && extra !== "" && Number(extra) !== 0 ? roundMoney(extra) : 0;
+    const row = {
+      hsCode: String(item.hsCode ?? "").trim() || "0000.0000",
+      productDescription: String(item.productDescription ?? "Item").replace(/[\u0000-\u001F\u007F]/g, " ").trim(),
+      rate: String(item.rate ?? "18%").trim() || "18%",
+      uoM: String(item.uoM ?? "Numbers").trim() || "Numbers",
+      quantity: roundQty(item.quantity),
+      totalValues: roundMoney(item.totalValues),
+      valueSalesExcludingST: roundMoney(item.valueSalesExcludingST),
+      fixedNotifiedValueOrRetailPrice: roundMoney(item.fixedNotifiedValueOrRetailPrice),
+      salesTaxApplicable: roundMoney(item.salesTaxApplicable),
+      salesTaxWithheldAtSource: roundMoney(item.salesTaxWithheldAtSource),
+      extraTax,
+      furtherTax: roundMoney(item.furtherTax),
+      sroScheduleNo: String(item.sroScheduleNo ?? ""),
+      fedPayable: roundMoney(item.fedPayable),
+      discount: roundMoney(item.discount),
+      saleType: String(item.saleType ?? "Goods at standard rate (default)").trim(),
+      sroItemSerialNo: String(item.sroItemSerialNo ?? ""),
+    };
+    const picked = {};
+    for (const key of FBR_ITEM_KEYS) picked[key] = row[key];
+    return picked;
+  });
+
+  const headerKeys = isSandbox ? [...FBR_PRODUCTION_HEADER_KEYS, "scenarioId"] : FBR_PRODUCTION_HEADER_KEYS;
+  const strict = {};
+  for (const key of headerKeys) {
+    if (key === "scenarioId") {
+      if (isSandbox && payload.scenarioId) strict.scenarioId = String(payload.scenarioId).trim();
+      continue;
+    }
+    strict[key] = payload[key];
+  }
+  if (strict.invoiceType !== "Debit Note") strict.invoiceRefNo = "";
+  strict.items = items;
+  return strict;
+}
+
+function parseInboundPayload(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return typeof raw === "object" ? raw : null;
+}
+
+/** FBR gateway errors (Code 03 etc.) arrive without validationResponse wrapper on HTTP 500. */
+function extractFbrGatewayError(validateData, validateResult) {
+  const vr = validateData?.validationResponse;
+  if (vr?.error?.trim()) return vr.error.trim();
+  if (vr?.status?.trim() && vr.status !== "Valid") return vr.status.trim();
+  const gatewayErr = typeof validateData?.error === "string" ? validateData.error.trim() : "";
+  const code = validateData?.Code != null ? String(validateData.Code).trim() : "";
+  if (gatewayErr) {
+    if (code === "03") {
+      return `${gatewayErr} (FBR Code 03). Fix payload types: extraTax must be 0 not "", numeric amounts, no scenarioId in production.`;
+    }
+    return code ? `${gatewayErr} (FBR Code ${code})` : gatewayErr;
+  }
+  if (validateResult.status !== 200) {
+    return `FBR validate returned HTTP ${validateResult.status} (${validateResult.url}). ${validateResult.status >= 500 ? "Gateway/server error — confirm production DI token, IP whitelist, and that the token is not a sandbox token." : "Check validate URL and token."}`;
+  }
+  return "Validation failed";
+}
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
@@ -41,8 +187,7 @@ function auth(req, res, next) {
 }
 
 async function callFbr(baseUrl, bearerToken, path, payload, logLabel = "FBR") {
-  const base = (baseUrl || "").replace(/\/$/, "");
-  // If base URL is already a full endpoint (ends with this path), use as-is to avoid duplicating path
+  const base = normalizeFbrGatewayBaseUrl(baseUrl);
   const pathNoLeading = path.replace(/^\//, "");
   const isFullUrl = pathNoLeading && (base.endsWith(pathNoLeading) || base === pathNoLeading);
   const url = isFullUrl ? base : `${base}${path}`;
@@ -58,15 +203,26 @@ async function callFbr(baseUrl, bearerToken, path, payload, logLabel = "FBR") {
   });
   const elapsedMs = Date.now() - startMs;
   const status = res.status;
-  const body = await res.json().catch(() => ({}));
+  const rawText = await res.text();
+  let body = {};
+  if (rawText) {
+    try {
+      body = JSON.parse(rawText);
+    } catch {
+      body = { error: rawText.slice(0, 500) };
+    }
+  }
   console.log(`[FBR middleware] ${logLabel} response status: ${status}, body keys: ${Object.keys(body || {}).join(", ") || "(empty)"}, FBR took: ${elapsedMs} ms`);
-  return { status, body };
+  if (status >= 500 && rawText) {
+    console.warn(`[FBR middleware] ${logLabel} HTTP ${status} body preview:`, rawText.slice(0, 500));
+  }
+  return { status, body, url, rawText };
 }
 
 app.post("/api/submit", auth, async (req, res) => {
   const submitStartMs = Date.now();
   console.log("[FBR middleware] ----- POST /api/submit received -----");
-  const payload = req.body?.payload;
+  let payload = parseInboundPayload(req.body?.payload);
   const fbrBearerToken = (req.body?.fbrBearerToken && String(req.body.fbrBearerToken).trim()) || null;
   const fbrBaseUrl = (req.body?.fbrBaseUrl && String(req.body.fbrBaseUrl).trim()) || null;
   const fbrValidateBaseUrl = (req.body?.fbrValidateBaseUrl && String(req.body.fbrValidateBaseUrl).trim()) || null;
@@ -84,30 +240,34 @@ app.post("/api/submit", auth, async (req, res) => {
     });
   }
 
-  const isSandbox = payload.scenarioId != null;
+  const isSandbox =
+    typeof req.body?.isSandbox === "boolean"
+      ? req.body.isSandbox
+      : payload.scenarioId != null;
+  let outboundPayload = isSandbox ? payload : stripSandboxFields(payload);
+  outboundPayload = normalizeOutboundPayload(outboundPayload, isSandbox);
   const validatePath = isSandbox ? VALIDATE_SB : VALIDATE_PROD;
   const postPath = isSandbox ? POST_SB : POST_PROD;
-  const base = (fbrBaseUrl || "").replace(/\/$/, "");
+  const base = normalizeFbrGatewayBaseUrl(fbrBaseUrl);
   // In sandbox, use separate validate URL/token when provided (validateinvoicedata sandbox URL)
   const validateBaseUrl = isSandbox && fbrValidateBaseUrl && fbrValidateToken
-    ? fbrValidateBaseUrl.replace(/\/$/, "")
+    ? normalizeFbrGatewayBaseUrl(fbrValidateBaseUrl)
     : base;
   const validateToken = isSandbox && fbrValidateBaseUrl && fbrValidateToken ? fbrValidateToken : fbrBearerToken;
   console.log("[FBR middleware] FBR base URL (post):", base, "| sandbox:", isSandbox, "| validate path:", validatePath, "| post path:", postPath);
   if (isSandbox && fbrValidateBaseUrl && fbrValidateToken) {
     console.log("[FBR middleware] Validate URL (sandbox):", validateBaseUrl);
   }
-  console.log("[FBR middleware] Payload: invoiceDate:", payload.invoiceDate, "| items:", (payload.items || []).length, "| scenarioId:", payload.scenarioId ?? "(prod)");
+  console.log("[FBR middleware] Payload: invoiceDate:", outboundPayload.invoiceDate, "| items:", (outboundPayload.items || []).length, "| scenarioId:", outboundPayload.scenarioId ?? "(prod)");
 
-  const validateResult = await callFbr(validateBaseUrl, validateToken, validatePath, payload, "Validate");
+  const validateResult = await callFbr(validateBaseUrl, validateToken, validatePath, outboundPayload, "Validate");
   const validateData = validateResult.body || {};
   const vr = validateData.validationResponse;
   // Do not post unless validation clearly succeeded: HTTP 200 and validationResponse.statusCode "00"
   const validateOk = validateResult.status === 200 && vr && vr.statusCode === "00";
   if (!validateOk) {
-    const statusCode = vr?.statusCode ?? (validateResult.status !== 200 ? String(validateResult.status) : "(no response)");
-    let errMsg = vr?.error || vr?.status ||
-      (validateResult.status !== 200 ? `Validate request failed (HTTP ${validateResult.status}). Check validate URL.` : "Validation failed");
+    const statusCode = vr?.statusCode ?? validateData?.Code ?? (validateResult.status !== 200 ? String(validateResult.status) : "(no response)");
+    let errMsg = extractFbrGatewayError(validateData, validateResult);
     // Build detailed message from per-item errors (invoiceStatuses) when present
     const itemErrors = Array.isArray(vr?.invoiceStatuses)
       ? vr.invoiceStatuses
@@ -122,19 +282,22 @@ app.post("/api/submit", auth, async (req, res) => {
     // Log and return the complete FBR validate response (full raw body we received)
     const fullValidateResponse = validateResult.body ?? validateData;
     console.warn("[FBR middleware] Validate failed – not proceeding to post. HTTP:", validateResult.status, "statusCode:", statusCode, "error:", errMsg);
+    console.warn("[FBR middleware] Outbound payload preview:", JSON.stringify(outboundPayload).slice(0, 800));
     console.warn("[FBR middleware] Full FBR validate response (complete):", JSON.stringify(fullValidateResponse, null, 2));
     console.warn("[FBR middleware] ----- POST /api/submit complete (400 validate), total:", Date.now() - submitStartMs, "ms -----");
     return res.status(400).json({
       ok: false,
       error: errMsg,
       statusCode: statusCode,
+      validateUrl: validateResult.url,
+      fbrValidateHttpStatus: validateResult.status,
       validationResponse: vr || { statusCode: "", status: "Error", error: errMsg },
       fbrValidateResponse: fullValidateResponse,
       fbrPostResponse: null,
     });
   }
 
-  const postResult = await callFbr(fbrBaseUrl, fbrBearerToken, postPath, payload, "Post");
+  const postResult = await callFbr(base, fbrBearerToken, postPath, outboundPayload, "Post");
   const postData = postResult.body || {};
   const postVr = postData.validationResponse;
   if (postResult.status !== 200 || (postVr && postVr.statusCode !== "00")) {
