@@ -78,6 +78,24 @@ function normalizeFbrGatewayBaseUrl(baseUrl) {
   }
 }
 
+function normalizeFbrNtnCnic(raw) {
+  const cleaned = String(raw ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().trim();
+  if (!cleaned) return "";
+  if (cleaned.length === 7 || cleaned.length === 9 || cleaned.length === 13) return cleaned;
+  if (cleaned.length > 13) return cleaned.slice(0, 13);
+  if (cleaned.length > 9) return cleaned.slice(0, 9);
+  if (cleaned.length === 8) return cleaned.slice(0, 7);
+  return cleaned;
+}
+
+function sanitizeFbrText(value) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, "")
+    .replace(/["'`\\]/g, "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
 function stripSandboxFields(payload) {
   if (!payload || typeof payload !== "object") return payload;
   const { scenarioId, ...rest } = payload;
@@ -104,7 +122,7 @@ function normalizeOutboundPayload(payload, isSandbox) {
     const extraTax = extra != null && extra !== "" && Number(extra) !== 0 ? roundMoney(extra) : 0;
     const row = {
       hsCode: String(item.hsCode ?? "").trim() || "0000.0000",
-      productDescription: String(item.productDescription ?? "Item").replace(/[\u0000-\u001F\u007F]/g, " ").trim(),
+      productDescription: sanitizeFbrText(item.productDescription) || "Item",
       rate: String(item.rate ?? "18%").trim() || "18%",
       uoM: String(item.uoM ?? "Numbers").trim() || "Numbers",
       quantity: roundQty(item.quantity),
@@ -131,6 +149,10 @@ function normalizeOutboundPayload(payload, isSandbox) {
   for (const key of headerKeys) {
     if (key === "scenarioId") {
       if (isSandbox && payload.scenarioId) strict.scenarioId = String(payload.scenarioId).trim();
+      continue;
+    }
+    if (key === "sellerNTNCNIC" || key === "buyerNTNCNIC") {
+      strict[key] = normalizeFbrNtnCnic(payload[key]) || "0";
       continue;
     }
     strict[key] = payload[key];
@@ -160,9 +182,9 @@ function extractFbrGatewayError(validateData, validateResult) {
   const gatewayErr = typeof validateData?.error === "string" ? validateData.error.trim() : "";
   const code = validateData?.Code != null ? String(validateData.Code).trim() : "";
   if (gatewayErr) {
-    if (code === "03") {
-      return `${gatewayErr} (FBR Code 03). Fix payload types: extraTax must be 0 not "", numeric amounts, no scenarioId in production.`;
-    }
+      if (code === "03") {
+        return `${gatewayErr} (FBR Code 03). Check NTN/CNIC is 7 or 9 chars (digits/letters) or 13-digit CNIC (not 8), extraTax is 0 not "", and descriptions have no quotes.`;
+      }
     return code ? `${gatewayErr} (FBR Code ${code})` : gatewayErr;
   }
   if (validateResult.status !== 200) {
